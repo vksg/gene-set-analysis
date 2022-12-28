@@ -59,32 +59,35 @@ def do_gene_set_calc(csr_mat, gsoi, num_fake_gene_sets, top_perc: float):
 class TestFunc(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(seed=0)
-        num_cells = 1000
-        num_genes = 2000
+        self.num_cells = 1000
+        self.num_genes = 2000
         coo = make_random_coo_matrix(
-            rng, nnz=10000, num_rows=num_genes, num_cols=num_cells
+            rng, nnz=10000, num_rows=self.num_genes, num_cols=self.num_cells
         )
         self.csr = coo.tocsr()
 
         gene_set_size = 50
         self.num_fake_gene_sets = 20
         self.top_perc = 50
-        self.gsoi = rng.choice(a=num_genes, size=gene_set_size, replace=False)
+        self.gsoi = rng.choice(
+            a=self.num_genes, size=gene_set_size, replace=False
+        ).astype(np.uint64)
 
     def test_gene_set_calc(self):
         v = do_gene_set_calc(
             self.csr, self.gsoi, self.num_fake_gene_sets, self.top_perc
         )
-        self.assertEqual(v, 2)
-
-    def test_axpy(self):
-        rng = np.random.default_rng(0)
-        a = 0.2
-        x = rng.random(20)
-        y = rng.random(20)
-        pyres = a * x + y
-        rustres = gene_set_calc.axpy_py(a, x, y)
-        self.assertIsNone(np.testing.assert_allclose(rustres, pyres, rtol=1e-6))
+        w = gene_set_calc.run_calc_py(
+            self.csr.data.astype(np.float32),
+            self.csr.indices.astype(np.uint64),
+            self.csr.indptr.astype(np.uint64),
+            self.num_genes,
+            self.num_cells,
+            self.top_perc,
+            100,
+            self.gsoi.astype(np.uint64),
+        )
+        self.assertIsNone(np.testing.assert_allclose(v, w, atol=1e-2))
 
 
 if __name__ == "__main__":

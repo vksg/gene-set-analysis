@@ -22,3 +22,7 @@ version = "0.17.3"
 # "abi3-py37" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.7
 features = ["extension-module", "abi3-py37"]
 
+[profile.dev]
+opt-level = 1
+
+

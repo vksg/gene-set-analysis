@@ -21,7 +21,7 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
         indptr: PyReadonlyArray1<usize>,
         num_genes: usize,
         num_cells: usize,
-        max_index: usize,
+        top_perc: f64,
         num_fake_gene_sets: usize,
         gsoi: PyReadonlyArray1<usize>,
     ) -> &'py PyArray1<f32> {
@@ -31,7 +31,7 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
             indices.as_slice().unwrap(),
             indptr.as_slice().unwrap(),
             num_cells,
-            max_index,
+            top_perc,
             num_fake_gene_sets,
             all_genes.as_slice(),
             gsoi.as_slice().unwrap(),
@@ -97,11 +97,14 @@ pub fn run_gene_set_calc(
     indices: &[usize],
     indptr: &[usize],
     num_cells: usize,
-    max_index: usize,
+    top_perc: f64,
     num_fake_gene_sets: usize,
     all_genes: &[usize],
     gsoi: &[usize],
 ) -> Array1<f32> {
+    let max_index = (num_fake_gene_sets as f64 * (1.0 - top_perc / 100.0)).floor() as usize;
+    assert!(max_index >= 0);
+
     let mut rng = rand::thread_rng();
 
     let mut x_i = Array1::zeros(num_cells);
@@ -172,10 +175,10 @@ mod tests {
             .cloned()
             .collect();
 
-        let max_index = 5;
+        let top_perc = 95.0;
 
         let _result = run_gene_set_calc(
-            &data, &indices, &indptr, num_cells, max_index, 100, &all_genes, &gsoi,
+            &data, &indices, &indptr, num_cells, top_perc, 100, &all_genes, &gsoi,
         );
 
         Ok(())
