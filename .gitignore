@@ -1,0 +1,6 @@
+/target
+/Cargo.lock
+/.venv
+/**/__py*
+/**/*.so
+/.vscode
