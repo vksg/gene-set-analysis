@@ -1,19 +1,29 @@
-use anyhow::Error;
-use flate2::read::GzDecoder;
 use numpy::ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::{pymodule, types::PyModule, PyResult, Python};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
-use sprs::TriMat;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use std::ops::{DivAssign, SubAssign};
-use std::path::Path;
 
+/// Rust-extension for basic gene set calculations in single-cell data
 #[pymodule]
 fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    /// Compute a gene module score per cell
+    ///
+    /// Given a gene-cell matrix with normalized log-TPM counts, we compute a
+    /// gene-module score per cell. The matrix is assumed to be of dimensions
+    /// `num_genes` x `num_cells` and stored in CSR format as specified by
+    /// `data`, `indices` and `indptr`.
+    ///
+    /// `gsoi` consists of gene indices in this matrix that comprise the gene
+    /// set of interest.
+    ///
+    /// `num_fake_gene_sets` is the number of background gene sets to generate
+    ///
+    /// `top_perc` refers to the percentile of the background gene set
+    /// distribution to subtract from the expression of genes in the gene
+    /// set of interest.
     #[pyfn(m)]
     fn run_calc_py<'py>(
         py: Python<'py>,
@@ -26,66 +36,68 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
         num_fake_gene_sets: usize,
         gsoi: PyReadonlyArray1<usize>,
     ) -> &'py PyArray1<f32> {
-        let result = run_gene_set_calc(
+        let mat = CountMatrixCsr::new(
             data.as_slice().unwrap(),
             indices.as_slice().unwrap(),
             indptr.as_slice().unwrap(),
             num_genes,
             num_cells,
-            top_perc,
-            num_fake_gene_sets,
-            gsoi.as_slice().unwrap(),
         );
+        let result = run_gene_set_calc(mat, top_perc, num_fake_gene_sets, gsoi.as_slice().unwrap());
         result.into_pyarray(py)
     }
 
     Ok(())
 }
-/// mat: num_genes x num_cells, stored in CSR
-pub fn compute_mean_cols(
-    data: &[f32],
-    indices: &[usize],
-    indptr: &[usize],
-    gsoi: &[usize],
-    mean: &mut Array1<f32>,
-) {
-    mean.fill(0.);
-    for gi in gsoi.iter() {
-        let low = indptr[*gi];
-        let high = indptr[*gi + 1];
-        for i in low..high {
-            let ci = indices[i];
-            let val = data[i];
-            mean[ci] += val;
+
+/// Sparse CSR matrix
+struct CountMatrixCsr<'a> {
+    data: &'a [f32],
+    indices: &'a [usize],
+    indptr: &'a [usize],
+    num_genes: usize,
+    num_cells: usize,
+}
+
+impl CountMatrixCsr<'_> {
+    /// Create a new matrix
+    fn new<'a>(
+        data: &'a [f32],
+        indices: &'a [usize],
+        indptr: &'a [usize],
+        num_genes: usize,
+        num_cells: usize,
+    ) -> CountMatrixCsr<'a> {
+        CountMatrixCsr::<'a> {
+            data,
+            indices,
+            indptr,
+            num_genes,
+            num_cells,
         }
     }
 
-    mean.div_assign(gsoi.len() as f32);
+    /// Compute the per-cell mean expression for genes in a gene set
+    ///
+    /// Note: the result is passed in as a mutable input to save on memory
+    /// allocations
+    fn compute_mean_cols(&self, gsoi: &[usize], mean: &mut Array1<f32>) {
+        mean.fill(0.);
+        for gi in gsoi.iter() {
+            let low = self.indptr[*gi];
+            let high = self.indptr[*gi + 1];
+            for i in low..high {
+                let ci = self.indices[i];
+                let val = self.data[i];
+                mean[ci] += val;
+            }
+        }
+        mean.div_assign(gsoi.len() as f32);
+    }
 }
 
-pub fn load_mtx_coo(path: &Path) -> Result<TriMat<f32>, Error> {
-    // Read in barcodes
-    // let bc_path = path.join("barcodes.tsv.gz");
-    // let barcodes: Vec<Vec<u8>> = BufReader::new(GzDecoder::new(File::open(&bc_path)?))
-    //     .split(b'\n')
-    //     .map(|x| x.unwrap())
-    //     .collect();
-
-    // Read in features
-    // let ft_path = path.join("features.tsv.gz");
-    // let features: Vec<Vec<u8>> = BufReader::new(GzDecoder::new(File::open(&ft_path)?))
-    //     .split(b'\n')
-    //     .map(|x| x.unwrap())
-    //     .collect();
-
-    // Read in matrix as csc sparse matrix
-    let mat_path = path.join("matrix.mtx.gz");
-    let mut mat_reader = BufReader::new(GzDecoder::new(File::open(&mat_path)?));
-    let mat: TriMat<f32> = sprs::io::read_matrix_market_from_bufread(&mut mat_reader).unwrap();
-    Ok(mat)
-}
-
-pub fn make_fake_gene_set(
+/// Create a gene set with the same expression profile as the supplied one
+fn make_fake_gene_set(
     rng: &mut ThreadRng,
     gsoi_dict: &HashMap<usize, usize>,
     genes_by_bin: &Vec<Vec<usize>>,
@@ -98,47 +110,38 @@ pub fn make_fake_gene_set(
     fake_genes
 }
 
-pub fn run_gene_set_calc(
-    data: &[f32],
-    indices: &[usize],
-    indptr: &[usize],
-    num_genes: usize,
-    num_cells: usize,
-    top_perc: f64,
-    num_fake_gene_sets: usize,
-    gsoi: &[usize],
-) -> Array1<f32> {
-    assert!(indptr.len() == num_genes + 1);
-
-    let mut all_genes = (0..num_genes).into_iter().collect::<Vec<usize>>();
-    let max_index = (num_fake_gene_sets as f64 * (1.0 - top_perc / 100.0)).floor() as usize;
+fn compute_gene_set_expression_profile<'a>(
+    csr_mat: &'a CountMatrixCsr<'a>,
+    gsoi: &'a [usize],
+    num_gene_bins: usize,
+) -> (HashMap<usize, usize>, Vec<Vec<usize>>) {
+    let mut all_genes = (0..csr_mat.num_genes).into_iter().collect::<Vec<usize>>();
 
     // Compute mean expression over all cells for each gene
-    let mut mean_gex = Array1::<f32>::zeros(num_genes);
-    for i in 0..num_genes {
-        let low = indptr[i];
-        let high = indptr[i + 1];
-        for val in data[low..high].iter() {
+    let mut mean_gex = Array1::<f32>::zeros(csr_mat.num_genes);
+    for i in 0..csr_mat.num_genes {
+        let low = csr_mat.indptr[i];
+        let high = csr_mat.indptr[i + 1];
+        for val in csr_mat.data[low..high].iter() {
             mean_gex[i] += val
         }
     }
-    mean_gex.div_assign(num_cells as f32);
+    mean_gex.div_assign(csr_mat.num_cells as f32);
 
     // sort genes by expression
     all_genes.sort_unstable_by(|&a, &b| mean_gex[a].partial_cmp(&mean_gex[b]).unwrap());
-    let mut mean_gex_sorted = Array1::<f32>::zeros(num_genes);
+    let mut mean_gex_sorted = Array1::<f32>::zeros(csr_mat.num_genes);
     for (i, gene) in all_genes.iter().enumerate() {
         mean_gex_sorted[i] = mean_gex[*gene];
     }
 
     // Bin the genes into quantiles
-    let num_gene_bins = 20;
-    let step = (num_genes / num_gene_bins as usize).max(1);
+    let step = (csr_mat.num_genes / num_gene_bins as usize).max(1);
     let mut bin_edges = Vec::new();
     let mut genes_by_bin = Vec::new();
     for i in 0..num_gene_bins {
         let low = i * step;
-        let high = ((i + 1) * step).min(num_genes);
+        let high = ((i + 1) * step).min(csr_mat.num_genes);
         genes_by_bin.push(all_genes[low..high].to_vec());
         if i == 0 {
             bin_edges.push(-f32::INFINITY);
@@ -160,21 +163,51 @@ pub fn run_gene_set_calc(
             .or_insert(1_usize);
     }
 
+    (gsoi_dist, genes_by_bin)
+}
+
+/// Compute a gene module score per cell
+///
+/// Given a gene-cell matrix with normalized log-TPM counts, we compute a
+/// gene-module score per cell. The matrix is assumed to be of dimensions
+/// `num_genes` x `num_cells` and stored in CSR format as specified by
+/// `data`, `indices` and `indptr`.
+///
+/// `gsoi` consists of gene indices in this matrix that comprise the gene
+/// set of interest.
+///
+/// `num_fake_gene_sets` is the number of background gene sets to generate
+///
+/// `top_perc` refers to the percentile of the background gene set
+/// distribution to subtract from the expression of genes in the gene
+/// set of interest.
+fn run_gene_set_calc<'a>(
+    csr_mat: CountMatrixCsr<'a>,
+    top_perc: f64,
+    num_fake_gene_sets: usize,
+    gsoi: &'a [usize],
+) -> Array1<f32> {
+    assert!(csr_mat.indptr.len() == csr_mat.num_genes + 1);
+
+    let max_index = (num_fake_gene_sets as f64 * (1.0 - top_perc / 100.0)).floor() as usize;
+
+    let (gsoi_dist, genes_by_bin) = compute_gene_set_expression_profile(&csr_mat, &gsoi, 20);
+
     let mut rng = rand::thread_rng();
 
-    let mut x_i = Array1::zeros(num_cells);
-    compute_mean_cols(&data, &indices, &indptr, &gsoi, &mut x_i);
+    let mut x_i = Array1::zeros(csr_mat.num_cells);
+    csr_mat.compute_mean_cols(&gsoi, &mut x_i);
 
-    let mut top_n_mat = Array2::from_elem((num_cells, max_index + 2), -f32::INFINITY);
+    let mut top_n_mat = Array2::from_elem((csr_mat.num_cells, max_index + 2), -f32::INFINITY);
 
-    let mut fake_counts = Array1::zeros(num_cells);
+    let mut fake_counts = Array1::zeros(csr_mat.num_cells);
     for _ in 0..num_fake_gene_sets {
         let fake_gene_set = make_fake_gene_set(&mut rng, &gsoi_dist, &genes_by_bin);
         assert!(fake_gene_set.len() == gsoi.len());
-        compute_mean_cols(&data, &indices, &indptr, &fake_gene_set, &mut fake_counts);
+        csr_mat.compute_mean_cols(&fake_gene_set, &mut fake_counts);
 
         top_n_mat.column_mut(0).assign(&fake_counts);
-        for i in 0..num_cells {
+        for i in 0..csr_mat.num_cells {
             top_n_mat
                 .row_mut(i)
                 .as_slice_mut()
@@ -197,7 +230,7 @@ mod tests {
     use rand::distributions::{Distribution, Uniform};
 
     #[test]
-    fn test_load() -> Result<(), Error> {
+    fn test_load() {
         let mut rng = rand::thread_rng();
 
         let num_genes = 10_000;
@@ -233,10 +266,7 @@ mod tests {
 
         let top_perc = 95.0;
 
-        let _result = run_gene_set_calc(
-            &data, &indices, &indptr, num_genes, num_cells, top_perc, 100, &gsoi,
-        );
-
-        Ok(())
+        let csr_mat = CountMatrixCsr::new(&data, &indices, &indptr, num_genes, num_cells);
+        let _result = run_gene_set_calc(csr_mat, top_perc, 100, &gsoi);
     }
 }
