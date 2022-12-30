@@ -23,7 +23,7 @@ def main(argv):
     parser.add_argument("gene_sets_json", help="gene sets in json")
     parser.add_argument("gene_info_csv", help="gene info csv")
     parser.add_argument(
-        "--top_perc", default=95, help="percentile of background expression"
+        "--top_perc", default=None, help="percentile of background expression"
     )
     parser.add_argument(
         "--num_background_sets",
