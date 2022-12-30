@@ -14,7 +14,6 @@ decorator==5.1.1
 defusedxml==0.7.1
 entrypoints==0.4
 fastjsonschema==2.16.2
-gene_set_calc @ file:///var/folders/y8/9vfnfjj53431cr5rcpy1vmtc0000gn/T/.tmpgW8MFr/gene_set_calc-0.1.0-cp37-abi3-macosx_10_7_x86_64.whl
 idna==3.4
 importlib-metadata==5.2.0
 importlib-resources==5.10.1
