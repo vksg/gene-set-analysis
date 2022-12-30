@@ -6,6 +6,7 @@ use pyo3::{pymodule, types::PyModule, PyResult, Python};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
 use sprs::TriMat;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::ops::{DivAssign, SubAssign};
@@ -25,15 +26,14 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
         num_fake_gene_sets: usize,
         gsoi: PyReadonlyArray1<usize>,
     ) -> &'py PyArray1<f32> {
-        let all_genes = (0..num_genes).into_iter().collect::<Vec<usize>>();
         let result = run_gene_set_calc(
             data.as_slice().unwrap(),
             indices.as_slice().unwrap(),
             indptr.as_slice().unwrap(),
+            num_genes,
             num_cells,
             top_perc,
             num_fake_gene_sets,
-            all_genes.as_slice(),
             gsoi.as_slice().unwrap(),
         );
         result.into_pyarray(py)
@@ -85,25 +85,80 @@ pub fn load_mtx_coo(path: &Path) -> Result<TriMat<f32>, Error> {
     Ok(mat)
 }
 
-pub fn make_fake_gene_set(rng: &mut ThreadRng, all_genes: &[usize], gsoi: &[usize]) -> Vec<usize> {
-    all_genes
-        .choose_multiple(rng, gsoi.len())
-        .cloned()
-        .collect()
+pub fn make_fake_gene_set(
+    rng: &mut ThreadRng,
+    gsoi_dict: &HashMap<usize, usize>,
+    genes_by_bin: &Vec<Vec<usize>>,
+) -> Vec<usize> {
+    let mut fake_genes = Vec::new();
+    for (bin_index, num_pick) in gsoi_dict.iter() {
+        let bin_genes = genes_by_bin[*bin_index].as_slice();
+        fake_genes.extend(bin_genes.choose_multiple(rng, *num_pick));
+    }
+    fake_genes
 }
 
 pub fn run_gene_set_calc(
     data: &[f32],
     indices: &[usize],
     indptr: &[usize],
+    num_genes: usize,
     num_cells: usize,
     top_perc: f64,
     num_fake_gene_sets: usize,
-    all_genes: &[usize],
     gsoi: &[usize],
 ) -> Array1<f32> {
+    assert!(indptr.len() == num_genes + 1);
+
+    let mut all_genes = (0..num_genes).into_iter().collect::<Vec<usize>>();
     let max_index = (num_fake_gene_sets as f64 * (1.0 - top_perc / 100.0)).floor() as usize;
-    assert!(max_index >= 0);
+
+    // Compute mean expression over all cells for each gene
+    let mut mean_gex = Array1::<f32>::zeros(num_genes);
+    for i in 0..num_genes {
+        let low = indptr[i];
+        let high = indptr[i + 1];
+        for val in data[low..high].iter() {
+            mean_gex[i] += val
+        }
+    }
+    mean_gex.div_assign(num_cells as f32);
+
+    // sort genes by expression
+    all_genes.sort_unstable_by(|&a, &b| mean_gex[a].partial_cmp(&mean_gex[b]).unwrap());
+    let mut mean_gex_sorted = Array1::<f32>::zeros(num_genes);
+    for (i, gene) in all_genes.iter().enumerate() {
+        mean_gex_sorted[i] = mean_gex[*gene];
+    }
+
+    // Bin the genes into quantiles
+    let num_gene_bins = 20;
+    let step = (num_genes / num_gene_bins as usize).max(1);
+    let mut bin_edges = Vec::new();
+    let mut genes_by_bin = Vec::new();
+    for i in 0..num_gene_bins {
+        let low = i * step;
+        let high = ((i + 1) * step).min(num_genes);
+        genes_by_bin.push(all_genes[low..high].to_vec());
+        if i == 0 {
+            bin_edges.push(-f32::INFINITY);
+            bin_edges.push(mean_gex_sorted[high]);
+        } else if i == num_gene_bins - 1 {
+            bin_edges.push(f32::INFINITY);
+        } else {
+            bin_edges.push(mean_gex_sorted[high]);
+        }
+    }
+
+    let mut gsoi_dist = HashMap::new();
+    for gi in gsoi.iter() {
+        let exp = mean_gex[*gi];
+        let bi = bin_edges.as_slice().partition_point(|&x| x < exp) - 1;
+        gsoi_dist
+            .entry(bi)
+            .and_modify(|x| *x += 1)
+            .or_insert(1_usize);
+    }
 
     let mut rng = rand::thread_rng();
 
@@ -114,7 +169,8 @@ pub fn run_gene_set_calc(
 
     let mut fake_counts = Array1::zeros(num_cells);
     for _ in 0..num_fake_gene_sets {
-        let fake_gene_set = make_fake_gene_set(&mut rng, all_genes, &gsoi);
+        let fake_gene_set = make_fake_gene_set(&mut rng, &gsoi_dist, &genes_by_bin);
+        assert!(fake_gene_set.len() == gsoi.len());
         compute_mean_cols(&data, &indices, &indptr, &fake_gene_set, &mut fake_counts);
 
         top_n_mat.column_mut(0).assign(&fake_counts);
@@ -123,7 +179,7 @@ pub fn run_gene_set_calc(
                 .row_mut(i)
                 .as_slice_mut()
                 .unwrap()
-                .sort_by(|a, b| a.partial_cmp(b).unwrap());
+                .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
         }
     }
 
@@ -178,7 +234,7 @@ mod tests {
         let top_perc = 95.0;
 
         let _result = run_gene_set_calc(
-            &data, &indices, &indptr, num_cells, top_perc, 100, &all_genes, &gsoi,
+            &data, &indices, &indptr, num_genes, num_cells, top_perc, 100, &gsoi,
         );
 
         Ok(())
