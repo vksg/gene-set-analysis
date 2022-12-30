@@ -82,6 +82,7 @@ def main(argv):
 
     print(f"Done loading {time.time()-start_load:.1f}s")
 
+    gsois = []
     for key, val in gene_sets.items():
         gene_names = val["geneSymbols"]
         gsoi = []
@@ -89,10 +90,15 @@ def main(argv):
             ixs = gene_symbols.get(n, [])
             gsoi.extend(ixs)
         gsoi = np.array(gsoi, dtype=np.uint64)
-
         if gsoi.shape[0] == 0:
             print(f"gene set {key} is empty, skipping")
             continue
+        gsois.append((key, gsoi))
+    
+    # sort: largest first
+    gsois.sort(key=lambda (_, gsoi): len(gsoi), reverse=True)
+    
+    for key, gsoi in gsois:
         start = time.time()
         gene_set_calc.run_calc_py(
             rust_data,
