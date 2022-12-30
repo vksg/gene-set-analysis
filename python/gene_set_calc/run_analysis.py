@@ -94,10 +94,10 @@ def main(argv):
             print(f"gene set {key} is empty, skipping")
             continue
         gsois.append((key, gsoi))
-    
+
     # sort: largest first
-    gsois.sort(key=lambda (_, gsoi): len(gsoi), reverse=True)
-    
+    gsois.sort(key=lambda x: len(x[1]), reverse=True)
+
     for key, gsoi in gsois:
         start = time.time()
         gene_set_calc.run_calc_py(
