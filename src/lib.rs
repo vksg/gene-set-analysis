@@ -55,9 +55,7 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
         let gene_props = MatrixGeneProperties::new(&mat, num_gene_bins);
         let num_gene_sets = gsois.len();
         let mut result = Array2::<f32>::zeros((num_gene_sets, num_cells));
-        let index = Array1::from_iter(0..num_gene_sets)
-            .into_shape((num_gene_sets, 1))
-            .unwrap();
+
         println!(
             "INFO: {:.1} s setting up data structures",
             SystemTime::now()
@@ -65,22 +63,39 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
                 .unwrap()
                 .as_secs_f32()
         );
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build_global()
-            .unwrap();
-        Zip::from(result.axis_iter_mut(Axis(0)))
-            .and(index.axis_iter(Axis(0)))
-            .into_par_iter()
-            .for_each(|(row, i)| {
-                let gsoi = &gsois[i[0]];
+        if num_threads > 1 {
+            // Multi-threaded version
+            let index = Array1::from_iter(0..num_gene_sets)
+                .into_shape((num_gene_sets, 1))
+                .unwrap();
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build_global()
+                .unwrap();
+            Zip::from(result.axis_iter_mut(Axis(0)))
+                .and(index.axis_iter(Axis(0)))
+                .into_par_iter()
+                .for_each(|(row, i)| {
+                    let gsoi = &gsois[i[0]];
+                    top_perc
+                        .map_or(
+                            run_gene_set_calc_mean(&mat, num_fake_gene_sets, &gsoi, &gene_props),
+                            |t| run_gene_set_calc(&mat, t, num_fake_gene_sets, &gsoi, &gene_props),
+                        )
+                        .assign_to(row);
+                });
+        } else {
+            // Single-threaded version w/o rayon for a simpler stack trace
+            for (i, gsoi) in gsois.iter().enumerate() {
+                let row = result.row_mut(i);
                 top_perc
                     .map_or(
                         run_gene_set_calc_mean(&mat, num_fake_gene_sets, &gsoi, &gene_props),
                         |t| run_gene_set_calc(&mat, t, num_fake_gene_sets, &gsoi, &gene_props),
                     )
                     .assign_to(row);
-            });
+            }
+        }
 
         result.into_pyarray(py)
     }
