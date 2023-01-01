@@ -25,12 +25,13 @@ def main(argv):
     parser.add_argument(
         "--top_perc", default=None, help="percentile of background expression"
     )
+    parser.add_argument("--threads", default=1, type=int, help="number of threads")
     parser.add_argument(
         "--num_background_sets",
         default=100,
         help="number of background gene sets to generate",
     )
-    parser.add_argument("--head", default=0, help="only do top N gene sets")
+    parser.add_argument("--head", default=0, type=int, help="only do top N gene sets")
     args = parser.parse_args(argv[1:])
 
     if args.csr_matrix_pickle and args.csr_matrix_h5ad:
@@ -89,8 +90,7 @@ def main(argv):
         for n in gene_names:
             ixs = gene_symbols.get(n, [])
             gsoi.extend(ixs)
-        gsoi = np.array(gsoi, dtype=np.uint64)
-        if gsoi.shape[0] == 0:
+        if not gsoi:
             print(f"gene set {key} is empty, skipping")
             continue
         gsois.append((key, gsoi))
@@ -98,9 +98,28 @@ def main(argv):
     # sort: largest first
     gsois.sort(key=lambda x: len(x[1]), reverse=True)
 
-    for key, gsoi in gsois:
+    truncate = args.head if args.head else len(gsois)
+
+    first = time.time()
+
+    if args.threads == 1:
+        for key, gsoi in gsois[:truncate]:
+            start = time.time()
+            gene_set_calc.run_calc_py(
+                rust_data,
+                rust_indices,
+                rust_indptr,
+                num_genes,
+                num_cells,
+                top_perc=args.top_perc,
+                num_fake_gene_sets=args.num_background_sets,
+                gsoi=gsoi,
+            )
+            print(f"{key}: {len(gsoi)} genes. time={time.time() - start:.1f}s")
+    else:
+        process = [x[1] for x in gsois[:truncate]]
         start = time.time()
-        gene_set_calc.run_calc_py(
+        gene_set_calc.run_multi_calc_py(
             rust_data,
             rust_indices,
             rust_indptr,
@@ -108,9 +127,12 @@ def main(argv):
             num_cells,
             top_perc=args.top_perc,
             num_fake_gene_sets=args.num_background_sets,
-            gsoi=gsoi,
+            gsois=process,
+            num_threads=args.threads,
         )
-        print(f"{key}: {len(gsoi)} genes. time={time.time() - start:.1f}s")
+        for key, gsoi in gsois[:truncate]:
+            print(f"{key}: {len(gsoi)} genes.")
+    print(f"total time ({args.threads} threads)={time.time() - first:.1f}s")
 
 
 if __name__ == "__main__":

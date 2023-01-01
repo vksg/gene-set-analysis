@@ -71,7 +71,7 @@ class TestFunc(unittest.TestCase):
         self.top_perc = 50
         self.gsoi = rng.choice(
             a=self.num_genes, size=gene_set_size, replace=False
-        ).astype(np.uint64)
+        ).tolist()
 
     def test_gene_set_calc(self):
         v = do_gene_set_calc(
@@ -85,7 +85,7 @@ class TestFunc(unittest.TestCase):
             self.num_cells,
             self.top_perc,
             100,
-            self.gsoi.astype(np.uint64),
+            self.gsoi,
         )
 
         # NOTE: this assert is turned off since the python and rust impls

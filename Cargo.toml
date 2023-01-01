@@ -10,11 +10,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rand = "*"
-ndarray = "*"
+ndarray = {version="*", features=["rayon"]}
 numpy = "*"
 anyhow = "*"
 flate2 = "*"
 sprs = "*"
+rayon = "*"
 
 [dependencies.pyo3]
 version = "0.17.3"

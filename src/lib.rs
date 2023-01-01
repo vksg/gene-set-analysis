@@ -1,8 +1,11 @@
+use ndarray::{Axis, Zip};
 use numpy::ndarray::{Array1, Array2};
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::{pymodule, types::PyModule, PyResult, Python};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
+use rayon::iter::ParallelIterator;
+use rayon::prelude::IntoParallelIterator;
 use std::ops::{AddAssign, DivAssign, SubAssign};
 
 /// Rust-extension for basic gene set calculations in single-cell data
@@ -33,7 +36,7 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
         num_cells: usize,
         top_perc: Option<f64>,
         num_fake_gene_sets: usize,
-        gsoi: PyReadonlyArray1<usize>,
+        gsoi: Vec<usize>,
     ) -> &'py PyArray1<f32> {
         let mat = CountMatrixCsr::new(
             data.as_slice().unwrap(),
@@ -42,13 +45,57 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
             num_genes,
             num_cells,
         );
-        let result = match top_perc {
-            Some(t) => run_gene_set_calc(mat, t, num_fake_gene_sets, gsoi.as_slice().unwrap()),
-            None => run_gene_set_calc_mean(mat, num_fake_gene_sets, gsoi.as_slice().unwrap()),
-        };
+        let result = top_perc.map_or(
+            run_gene_set_calc_mean(&mat, num_fake_gene_sets, gsoi.as_slice()),
+            |t| run_gene_set_calc(&mat, t, num_fake_gene_sets, gsoi.as_slice()),
+        );
         result.into_pyarray(py)
     }
 
+    #[pyfn(m)]
+    fn run_multi_calc_py<'py>(
+        py: Python<'py>,
+        data: PyReadonlyArray1<f32>,
+        indices: PyReadonlyArray1<usize>,
+        indptr: PyReadonlyArray1<usize>,
+        num_genes: usize,
+        num_cells: usize,
+        top_perc: Option<f64>,
+        num_fake_gene_sets: usize,
+        gsois: Vec<Vec<usize>>,
+        num_threads: usize,
+    ) -> &'py PyArray2<f32> {
+        let mat = CountMatrixCsr::new(
+            data.as_slice().unwrap(),
+            indices.as_slice().unwrap(),
+            indptr.as_slice().unwrap(),
+            num_genes,
+            num_cells,
+        );
+        let num_gene_sets = gsois.len();
+        let mut result = Array2::<f32>::zeros((num_gene_sets, num_cells));
+        let index = Array1::from_iter(0..num_gene_sets)
+            .into_shape((num_gene_sets, 1))
+            .unwrap();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .unwrap();
+        Zip::from(result.axis_iter_mut(Axis(0)))
+            .and(index.axis_iter(Axis(0)))
+            .into_par_iter()
+            .for_each(|(row, i)| {
+                let gsoi = &gsois[i[0]];
+                top_perc
+                    .map_or(
+                        run_gene_set_calc_mean(&mat, num_fake_gene_sets, &gsoi),
+                        |t| run_gene_set_calc(&mat, t, num_fake_gene_sets, &gsoi),
+                    )
+                    .assign_to(row);
+            });
+
+        result.into_pyarray(py)
+    }
     Ok(())
 }
 
@@ -181,7 +228,7 @@ fn compute_gene_set_expression_profile<'a>(
 /// distribution to subtract from the expression of genes in the gene
 /// set of interest.
 fn run_gene_set_calc<'a>(
-    csr_mat: CountMatrixCsr<'a>,
+    csr_mat: &'a CountMatrixCsr<'a>,
     top_perc: f64,
     num_fake_gene_sets: usize,
     gsoi: &'a [usize],
@@ -221,7 +268,7 @@ fn run_gene_set_calc<'a>(
 }
 
 fn run_gene_set_calc_mean<'a>(
-    csr_mat: CountMatrixCsr<'a>,
+    csr_mat: &'a CountMatrixCsr<'a>,
     num_fake_gene_sets: usize,
     gsoi: &'a [usize],
 ) -> Array1<f32> {
@@ -293,8 +340,7 @@ mod tests {
             .collect();
 
         let top_perc = 95.0;
-
         let csr_mat = CountMatrixCsr::new(&data, &indices, &indptr, num_genes, num_cells);
-        let _result = run_gene_set_calc(csr_mat, top_perc, 100, &gsoi);
+        let _result = run_gene_set_calc(&csr_mat, top_perc, 100, &gsoi);
     }
 }
