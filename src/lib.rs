@@ -1,12 +1,13 @@
 use ndarray::{Axis, Zip};
 use numpy::ndarray::{Array1, Array2};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::{pymodule, types::PyModule, PyResult, Python};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelIterator;
 use std::ops::{AddAssign, DivAssign, SubAssign};
+use std::time::SystemTime;
 
 /// Rust-extension for basic gene set calculations in single-cell data
 #[pymodule]
@@ -26,32 +27,9 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     /// `top_perc` refers to the percentile of the background gene set
     /// distribution to subtract from the expression of genes in the gene
     /// set of interest. If `None` compute the mean of the background gene sets.
-    #[pyfn(m)]
-    fn run_calc_py<'py>(
-        py: Python<'py>,
-        data: PyReadonlyArray1<f32>,
-        indices: PyReadonlyArray1<usize>,
-        indptr: PyReadonlyArray1<usize>,
-        num_genes: usize,
-        num_cells: usize,
-        top_perc: Option<f64>,
-        num_fake_gene_sets: usize,
-        gsoi: Vec<usize>,
-    ) -> &'py PyArray1<f32> {
-        let mat = CountMatrixCsr::new(
-            data.as_slice().unwrap(),
-            indices.as_slice().unwrap(),
-            indptr.as_slice().unwrap(),
-            num_genes,
-            num_cells,
-        );
-        let result = top_perc.map_or(
-            run_gene_set_calc_mean(&mat, num_fake_gene_sets, gsoi.as_slice()),
-            |t| run_gene_set_calc(&mat, t, num_fake_gene_sets, gsoi.as_slice()),
-        );
-        result.into_pyarray(py)
-    }
-
+    ///
+    /// `num_gene_bins` is the number of quantile bins to divide the full set
+    /// of genes into for the purpose of drawing background gene sets.
     #[pyfn(m)]
     fn run_multi_calc_py<'py>(
         py: Python<'py>,
@@ -62,6 +40,7 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
         num_cells: usize,
         top_perc: Option<f64>,
         num_fake_gene_sets: usize,
+        num_gene_bins: usize,
         gsois: Vec<Vec<usize>>,
         num_threads: usize,
     ) -> &'py PyArray2<f32> {
@@ -72,11 +51,20 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
             num_genes,
             num_cells,
         );
+        let start = SystemTime::now();
+        let gene_props = MatrixGeneProperties::new(&mat, num_gene_bins);
         let num_gene_sets = gsois.len();
         let mut result = Array2::<f32>::zeros((num_gene_sets, num_cells));
         let index = Array1::from_iter(0..num_gene_sets)
             .into_shape((num_gene_sets, 1))
             .unwrap();
+        println!(
+            "INFO: {:.1} s setting up data structures",
+            SystemTime::now()
+                .duration_since(start)
+                .unwrap()
+                .as_secs_f32()
+        );
         rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build_global()
@@ -88,8 +76,8 @@ fn gene_set_calc(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
                 let gsoi = &gsois[i[0]];
                 top_perc
                     .map_or(
-                        run_gene_set_calc_mean(&mat, num_fake_gene_sets, &gsoi),
-                        |t| run_gene_set_calc(&mat, t, num_fake_gene_sets, &gsoi),
+                        run_gene_set_calc_mean(&mat, num_fake_gene_sets, &gsoi, &gene_props),
+                        |t| run_gene_set_calc(&mat, t, num_fake_gene_sets, &gsoi, &gene_props),
                     )
                     .assign_to(row);
             });
@@ -143,6 +131,21 @@ impl CountMatrixCsr<'_> {
         }
         mean.div_assign(gsoi.len() as f32);
     }
+
+    /// Compute mean expression over all cells per gene
+    fn compute_mean_expression_over_cells(&self) -> Array1<f32> {
+        // Compute mean expression over all cells for each gene
+        let mut mean_gex = Array1::<f32>::zeros(self.num_genes);
+        for i in 0..self.num_genes {
+            let low = self.indptr[i];
+            let high = self.indptr[i + 1];
+            for val in self.data[low..high].iter() {
+                mean_gex[i] += val
+            }
+        }
+        mean_gex.div_assign(self.num_cells as f32);
+        mean_gex
+    }
 }
 
 /// Create a gene set with the same expression profile as the supplied one
@@ -157,59 +160,6 @@ fn make_fake_gene_set(
         fake_genes.extend(bin_genes.choose_multiple(rng, *num_pick));
     }
     fake_genes
-}
-
-fn compute_gene_set_expression_profile<'a>(
-    csr_mat: &'a CountMatrixCsr<'a>,
-    gsoi: &'a [usize],
-    num_gene_bins: usize,
-) -> (Vec<usize>, Vec<Vec<usize>>) {
-    let mut all_genes = (0..csr_mat.num_genes).into_iter().collect::<Vec<usize>>();
-
-    // Compute mean expression over all cells for each gene
-    let mut mean_gex = Array1::<f32>::zeros(csr_mat.num_genes);
-    for i in 0..csr_mat.num_genes {
-        let low = csr_mat.indptr[i];
-        let high = csr_mat.indptr[i + 1];
-        for val in csr_mat.data[low..high].iter() {
-            mean_gex[i] += val
-        }
-    }
-    mean_gex.div_assign(csr_mat.num_cells as f32);
-
-    // sort genes by expression
-    all_genes.sort_unstable_by(|&a, &b| mean_gex[a].partial_cmp(&mean_gex[b]).unwrap());
-    let mut mean_gex_sorted = Array1::<f32>::zeros(csr_mat.num_genes);
-    for (i, gene) in all_genes.iter().enumerate() {
-        mean_gex_sorted[i] = mean_gex[*gene];
-    }
-
-    // Bin the genes into quantiles
-    let step = (csr_mat.num_genes / num_gene_bins as usize).max(1);
-    let mut bin_edges = Vec::new();
-    let mut genes_by_bin = Vec::new();
-    for i in 0..num_gene_bins {
-        let low = i * step;
-        let high = ((i + 1) * step).min(csr_mat.num_genes);
-        genes_by_bin.push(all_genes[low..high].to_vec());
-        if i == 0 {
-            bin_edges.push(-f32::INFINITY);
-            bin_edges.push(mean_gex_sorted[high]);
-        } else if i == num_gene_bins - 1 {
-            bin_edges.push(f32::INFINITY);
-        } else {
-            bin_edges.push(mean_gex_sorted[high]);
-        }
-    }
-
-    let mut gsoi_dist = vec![0; num_gene_bins];
-    for gi in gsoi.iter() {
-        let exp = mean_gex[*gi];
-        let bi = bin_edges.as_slice().partition_point(|&x| x < exp) - 1;
-        gsoi_dist[bi] += 1;
-    }
-
-    (gsoi_dist, genes_by_bin)
 }
 
 /// Compute a gene module score per cell
@@ -227,17 +177,27 @@ fn compute_gene_set_expression_profile<'a>(
 /// `top_perc` refers to the percentile of the background gene set
 /// distribution to subtract from the expression of genes in the gene
 /// set of interest.
-fn run_gene_set_calc<'a>(
+fn run_gene_set_calc<'a, 'b>(
     csr_mat: &'a CountMatrixCsr<'a>,
     top_perc: f64,
     num_fake_gene_sets: usize,
     gsoi: &'a [usize],
+    gene_props: &'b MatrixGeneProperties,
 ) -> Array1<f32> {
     assert!(csr_mat.indptr.len() == csr_mat.num_genes + 1);
 
     let max_index = (num_fake_gene_sets as f64 * (1.0 - top_perc / 100.0)).floor() as usize;
 
-    let (gsoi_dist, genes_by_bin) = compute_gene_set_expression_profile(&csr_mat, &gsoi, 20);
+    let mut gsoi_dist = vec![0; gene_props.num_gene_bins];
+    for gi in gsoi.iter() {
+        let exp = gene_props.mean_gex[*gi];
+        let bi = gene_props
+            .bin_edges
+            .as_slice()
+            .partition_point(|&x| x < exp)
+            - 1;
+        gsoi_dist[bi] += 1;
+    }
 
     let mut rng = rand::thread_rng();
 
@@ -248,7 +208,7 @@ fn run_gene_set_calc<'a>(
 
     let mut fake_counts = Array1::zeros(csr_mat.num_cells);
     for _ in 0..num_fake_gene_sets {
-        let fake_gene_set = make_fake_gene_set(&mut rng, &gsoi_dist, &genes_by_bin);
+        let fake_gene_set = make_fake_gene_set(&mut rng, &gsoi_dist, &gene_props.genes_by_bin);
         assert!(fake_gene_set.len() == gsoi.len());
         csr_mat.compute_mean_cols(&fake_gene_set, &mut fake_counts);
 
@@ -267,15 +227,71 @@ fn run_gene_set_calc<'a>(
     x_i
 }
 
-fn run_gene_set_calc_mean<'a>(
+struct MatrixGeneProperties {
+    num_gene_bins: usize,
+    mean_gex: Array1<f32>,
+    genes_by_bin: Vec<Vec<usize>>,
+    bin_edges: Vec<f32>,
+}
+
+impl MatrixGeneProperties {
+    fn new<'a>(csr_mat: &'a CountMatrixCsr<'a>, num_gene_bins: usize) -> Self {
+        let mut all_genes = (0..csr_mat.num_genes).into_iter().collect::<Vec<usize>>();
+
+        let mean_gex = csr_mat.compute_mean_expression_over_cells();
+
+        // sort genes by expression
+        all_genes.sort_unstable_by(|&a, &b| mean_gex[a].partial_cmp(&mean_gex[b]).unwrap());
+        let mut mean_gex_sorted = Array1::<f32>::zeros(csr_mat.num_genes);
+        for (i, gene) in all_genes.iter().enumerate() {
+            mean_gex_sorted[i] = mean_gex[*gene];
+        }
+
+        // Bin the genes into quantiles
+        let step = (csr_mat.num_genes / num_gene_bins as usize).max(1);
+        let mut bin_edges = Vec::new();
+        let mut genes_by_bin = Vec::new();
+        for i in 0..num_gene_bins {
+            let low = i * step;
+            let high = ((i + 1) * step).min(csr_mat.num_genes);
+            genes_by_bin.push(all_genes[low..high].to_vec());
+            if i == 0 {
+                bin_edges.push(-f32::INFINITY);
+                bin_edges.push(mean_gex_sorted[high]);
+            } else if i == num_gene_bins - 1 {
+                bin_edges.push(f32::INFINITY);
+            } else {
+                bin_edges.push(mean_gex_sorted[high]);
+            }
+        }
+
+        MatrixGeneProperties {
+            num_gene_bins: num_gene_bins,
+            mean_gex: mean_gex,
+            genes_by_bin: genes_by_bin,
+            bin_edges: bin_edges,
+        }
+    }
+}
+
+fn run_gene_set_calc_mean<'a, 'b>(
     csr_mat: &'a CountMatrixCsr<'a>,
     num_fake_gene_sets: usize,
     gsoi: &'a [usize],
+    gene_props: &'b MatrixGeneProperties,
 ) -> Array1<f32> {
     assert!(csr_mat.indptr.len() == csr_mat.num_genes + 1);
 
-    let (gsoi_dist, genes_by_bin) = compute_gene_set_expression_profile(&csr_mat, &gsoi, 20);
-
+    let mut gsoi_dist = vec![0; gene_props.num_gene_bins];
+    for gi in gsoi.iter() {
+        let exp = gene_props.mean_gex[*gi];
+        let bi = gene_props
+            .bin_edges
+            .as_slice()
+            .partition_point(|&x| x < exp)
+            - 1;
+        gsoi_dist[bi] += 1;
+    }
     let mut rng = rand::thread_rng();
 
     let mut x_i = Array1::zeros(csr_mat.num_cells);
@@ -284,7 +300,7 @@ fn run_gene_set_calc_mean<'a>(
     let mut back_mean = Array1::<f32>::zeros(csr_mat.num_cells);
     let mut fake_counts = Array1::<f32>::zeros(csr_mat.num_cells);
     for _ in 0..num_fake_gene_sets {
-        let fake_gene_set = make_fake_gene_set(&mut rng, &gsoi_dist, &genes_by_bin);
+        let fake_gene_set = make_fake_gene_set(&mut rng, &gsoi_dist, &gene_props.genes_by_bin);
         assert!(fake_gene_set.len() == gsoi.len());
         csr_mat.compute_mean_cols(&fake_gene_set, &mut fake_counts);
 
@@ -341,6 +357,7 @@ mod tests {
 
         let top_perc = 95.0;
         let csr_mat = CountMatrixCsr::new(&data, &indices, &indptr, num_genes, num_cells);
-        let _result = run_gene_set_calc(&csr_mat, top_perc, 100, &gsoi);
+        let gene_props = MatrixGeneProperties::new(&csr_mat, 10);
+        let _result = run_gene_set_calc(&csr_mat, top_perc, 100, &gsoi, &gene_props);
     }
 }

@@ -77,15 +77,17 @@ class TestFunc(unittest.TestCase):
         v = do_gene_set_calc(
             self.csr, self.gsoi, self.num_fake_gene_sets, self.top_perc
         )
-        w = gene_set_calc.run_calc_py(
+        w = gene_set_calc.run_multi_calc_py(
             self.csr.data.astype(np.float32),
             self.csr.indices.astype(np.uint64),
             self.csr.indptr.astype(np.uint64),
             self.num_genes,
             self.num_cells,
             self.top_perc,
-            100,
-            self.gsoi,
+            num_fake_gene_sets=100,
+            num_gene_bins=10,
+            gsois=[self.gsoi],
+            num_threads=1,
         )
 
         # NOTE: this assert is turned off since the python and rust impls

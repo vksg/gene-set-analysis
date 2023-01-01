@@ -102,36 +102,21 @@ def main(argv):
 
     first = time.time()
 
-    if args.threads == 1:
-        for key, gsoi in gsois[:truncate]:
-            start = time.time()
-            gene_set_calc.run_calc_py(
-                rust_data,
-                rust_indices,
-                rust_indptr,
-                num_genes,
-                num_cells,
-                top_perc=args.top_perc,
-                num_fake_gene_sets=args.num_background_sets,
-                gsoi=gsoi,
-            )
-            print(f"{key}: {len(gsoi)} genes. time={time.time() - start:.1f}s")
-    else:
-        process = [x[1] for x in gsois[:truncate]]
-        start = time.time()
-        gene_set_calc.run_multi_calc_py(
-            rust_data,
-            rust_indices,
-            rust_indptr,
-            num_genes,
-            num_cells,
-            top_perc=args.top_perc,
-            num_fake_gene_sets=args.num_background_sets,
-            gsois=process,
-            num_threads=args.threads,
-        )
-        for key, gsoi in gsois[:truncate]:
-            print(f"{key}: {len(gsoi)} genes.")
+    start = time.time()
+    gene_set_calc.run_multi_calc_py(
+        rust_data,
+        rust_indices,
+        rust_indptr,
+        num_genes,
+        num_cells,
+        top_perc=args.top_perc,
+        num_fake_gene_sets=args.num_background_sets,
+        num_gene_bins=20,
+        gsois=[x[1] for x in gsois[:truncate]],
+        num_threads=args.threads,
+    )
+    for key, gsoi in gsois[:truncate]:
+        print(f"{key}: {len(gsoi)} genes.")
     print(f"total time ({args.threads} threads)={time.time() - first:.1f}s")
 
 
