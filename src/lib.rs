@@ -155,7 +155,7 @@ impl CountMatrixCsr<'_> {
             let low = self.indptr[i];
             let high = self.indptr[i + 1];
             for val in self.data[low..high].iter() {
-                mean_gex[i] += val
+                mean_gex[i] += val;
             }
         }
         mean_gex.div_assign(self.num_cells as f32);
