@@ -2,8 +2,10 @@ use ndarray::{Axis, Zip};
 use numpy::ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1};
 use pyo3::{pymodule, types::PyModule, PyResult, Python};
-use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
+use rand::RngCore;
+use rand_core::SeedableRng;
+use rand_pcg::Pcg64Mcg;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelIterator;
 use std::ops::{AddAssign, DivAssign, SubAssign};
@@ -164,8 +166,8 @@ impl CountMatrixCsr<'_> {
 }
 
 /// Create a gene set with the same expression profile as the supplied one
-fn make_fake_gene_set(
-    rng: &mut ThreadRng,
+fn make_fake_gene_set<T: SeedableRng + RngCore>(
+    rng: &mut T,
     gsoi_dist: &Vec<usize>,
     genes_by_bin: &Vec<Vec<usize>>,
 ) -> Vec<usize> {
@@ -214,7 +216,7 @@ fn run_gene_set_calc<'a, 'b>(
         gsoi_dist[bi] += 1;
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = Pcg64Mcg::seed_from_u64(0);
 
     let mut x_i = Array1::zeros(csr_mat.num_cells);
     csr_mat.compute_mean_cols(&gsoi, &mut x_i);
@@ -307,7 +309,7 @@ fn run_gene_set_calc_mean<'a, 'b>(
             - 1;
         gsoi_dist[bi] += 1;
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = Pcg64Mcg::seed_from_u64(0);
 
     let mut x_i = Array1::zeros(csr_mat.num_cells);
     csr_mat.compute_mean_cols(&gsoi, &mut x_i);
@@ -337,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_load() {
-        let mut rng = rand::thread_rng();
+        let mut rng = Pcg64Mcg::seed_from_u64(0);
 
         let num_genes = 10_000;
         let num_cells = 100_000;

@@ -10,6 +10,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rand = "*"
+rand_pcg = "*"
+rand_core = "*"
 ndarray = {version="*", features=["rayon"]}
 numpy = "*"
 anyhow = "*"
