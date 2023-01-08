@@ -25,7 +25,6 @@ The `-r` builds in release mode.
 
 3. Run python unit tests
 ```
-> cd python/gene_set_calc
-> python -m unittest test_matrix.py
+> pytest
 ```
 
