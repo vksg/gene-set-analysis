@@ -29,10 +29,11 @@ jobs:
       run: |
         python -m venv .venv
         source .venv/bin/activate
-        python -m pip install --upgrade pip pytest
+        python -m pip install --upgrade pip
         pip install -r requirements.txt
         maturin develop -r
         
     - name: Test with pytest
       run: |
+        source .venv/bin/activate
         pytest
