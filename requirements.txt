@@ -18,7 +18,6 @@ entrypoints==0.4
 exceptiongroup==1.1.0
 fastjsonschema==2.16.2
 fonttools==4.38.0
-gene_set_calc @ file:///var/folders/y8/9vfnfjj53431cr5rcpy1vmtc0000gn/T/.tmpFUjqOq/gene_set_calc-0.1.0-cp37-abi3-macosx_10_7_x86_64.whl
 h5py==3.7.0
 idna==3.4
 importlib-metadata==5.2.0
